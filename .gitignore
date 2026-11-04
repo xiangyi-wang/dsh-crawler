@@ -1,0 +1,7 @@
+node_modules/
+*.tgz
+*.tsbuildinfo
+lib/client.live.js
+lib/client.rev
+.DS_Store
+Thumbs.db

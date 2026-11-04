@@ -1,0 +1,23 @@
+Third-party notices
+===================
+
+Crawlers — engine, 1111 forms and audio
+---------------------------------------
+© Slava Rybin
+Source: https://daily.xyz/exhibition/crawlers-by-slava-rybin
+
+These assets are the original work of the artist and are included in this
+repository for personal, experimental and non-commercial use only, as part of a
+fan-made integration for DeepSeek Harness.
+
+They are NOT covered by this repository's BSD-3-Clause license (which applies to
+the integration code only) and may not be redistributed or used commercially
+without permission from the original author.
+
+If you are the rights holder and would like content removed, please open an issue.
+
+Demo assets
+-----------
+assets/demo.gif and assets/screenshot.png were rendered from a synthetic demo
+page written for this repository. They contain no user data, private session
+content, or third-party page captures.

@@ -1,0 +1,58 @@
+{
+  "name": "@dsh-external/dsh-crawler",
+  "version": "0.1.8",
+  "description": "在 DeepSeek Harness 界面上爬行的小虫子：1111 个来自 Slava Rybin《Crawlers》展的形态，吃掉界面上的词、长大、结丝、生灭；纯视觉特效，不写入你的内容。",
+  "private": false,
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib",
+    "!lib/client.live.js",
+    "!lib/client.rev",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "crawler",
+    "canvas",
+    "easter-egg",
+    "daily-xyz"
+  ],
+  "license": "BSD-3-Clause",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0-rc <5",
+    "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2"
+  },
+  "scripts": {
+    "build": "node scripts/build-client.cjs",
+    "pack": "node scripts/build-client.cjs && npm pack"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  }
+}

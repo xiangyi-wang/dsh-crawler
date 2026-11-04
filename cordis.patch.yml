@@ -1,0 +1,10 @@
+# dsh-crawler bundle patch — 让这只爬虫在 profile 里作为「常驻 bundle」装配。
+#
+# 之前只靠运行时注入（loader.create），宿主一重启就没了；
+# 装进 profile bundles 之后，还需要这份 patch 才能在每次启动时声明自己的 loader 行。
+#
+# host 半边不注册工具/路由，只保留插件身份；虫子本身全在 client（lib/client.js）。
+
+- insert:
+    - id: dsh-crawler
+      name: '@dsh-external/dsh-crawler'

@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Crawlers · demo</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background:
+      radial-gradient(1100px 700px at 20% -10%, #1b2735 0%, transparent 60%),
+      radial-gradient(900px 600px at 110% 110%, #1a2a3a 0%, transparent 55%),
+      linear-gradient(160deg, #0b1017 0%, #0e1520 55%, #0a0f16 100%);
+    color: #d7e2ee;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 56px 44px 72px; }
+  .eyebrow {
+    font: 11px/1.4 ui-monospace, Consolas, monospace;
+    letter-spacing: .18em; color: #6f8aa6; text-transform: uppercase; margin-bottom: 18px;
+  }
+  h1 { font-size: 42px; line-height: 1.15; margin: 0 0 18px; font-weight: 650; letter-spacing: -.01em; }
+  h1 em { font-style: normal; color: #7dd3fc; }
+  .lede { font-size: 17px; line-height: 1.8; color: #9fb3c8; margin: 0 0 30px; }
+  .chips { display: flex; gap: 10px; flex-wrap: wrap; margin: 0 0 34px; }
+  .chip {
+    border: 1px solid rgba(148, 163, 184, .28); border-radius: 999px;
+    padding: 7px 14px; font: 12px/1 ui-monospace, Consolas, monospace; color: #b7c7d8;
+    background: rgba(148, 163, 184, .06);
+  }
+  .card {
+    border: 1px solid rgba(148, 163, 184, .18); border-radius: 14px;
+    background: rgba(15, 23, 34, .55); padding: 22px 24px; margin: 0 0 26px;
+    backdrop-filter: blur(4px);
+  }
+  .card h2 { margin: 0 0 8px; font-size: 15px; color: #cfe3f5; font-weight: 600; }
+  .card p { margin: 0; color: #93a8bd; line-height: 1.8; font-size: 14px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .cols p { margin: 0 0 14px; line-height: 1.85; font-size: 14px; color: #9fb3c8; }
+  .foot { margin-top: 34px; font: 11px/1.6 ui-monospace, Consolas, monospace; color: #5f7488; }
+  .foot a { color: #7dd3fc; text-decoration: none; }
+  #crawler-debug { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="eyebrow">daily.xyz / crawlers · dsh plugin demo</div>
+    <h1>在界面上养几只<em>爬虫</em>，<br>它们会吃掉你的词。</h1>
+    <p class="lede">
+      这是一段用于演示的合成文本。虫子在你的字里行间爬行，路过时把词叼走，
+      吃多了会长大；高兴了会结丝、牵线，偶尔把爬过的按钮染成自己的颜色。
+      下面这些段落、按钮和卡片都是演示内容，不包含任何真实会话。
+    </p>
+    <div class="chips">
+      <span class="chip">1111 个形态</span>
+      <span class="chip">吃词</span>
+      <span class="chip">生长</span>
+      <span class="chip">织丝</span>
+      <span class="chip">感染界面</span>
+    </div>
+    <div class="cols">
+      <p>
+        形态来自 Slava Rybin 的线上展《Crawlers》。腿由各自的振荡器驱动，
+        相邻的腿互相牵引；它没有中央控制器，每一步都是局部的决定。
+        当它爬过一行字，会把遇到的词叼走，然后继续往前走。
+      </p>
+      <p>
+        在这里，鼠标不再是指针，而是一只影子：虫子会追着它走，或者自己
+        在文字和按钮之间巡游。被吃掉的词会短暂地消失，再从原地飞向虫子，
+        缩小，最后变成一点碎屑。
+      </p>
+    </div>
+    <div class="card">
+      <h2>感染界面</h2>
+      <p>
+        虫子爬过的元素会被临时染色、描边、放大或轻轻摆动，十二秒后原样还原。
+        它只改内联的视觉属性，不碰页面结构和文本。
+      </p>
+    </div>
+    <p class="foot">
+      原作引擎 / 形态 / 音频：Slava Rybin —
+      <a href="https://daily.xyz/exhibition/crawlers-by-slava-rybin">daily.xyz/exhibition/crawlers-by-slava-rybin</a>
+    </p>
+  </div>
+
+  <script>
+    // 用插件自己的 client bundle 启动 overlay（不需要 DSH 宿主）
+    window.__ModuleLoader__ = { load: function (m) { window.__crawlerModule = m } }
+  </script>
+  <script src="../lib/client.js"></script>
+  <script>
+    try {
+      localStorage.setItem('dsh-crawler.v2', JSON.stringify({
+        configRev: 2,
+        config: { enabled: true, mode: 'auto', count: 3, size: 'l', speed: 1.15, eat: true, silk: true, links: true, textFx: true, eatWords: true, infect: true, stagger: true, shy: true, birth: false, sound: false, lexicon: false }
+      }))
+    } catch (err) { /* ignore */ }
+
+    var mod = window.__crawlerModule.factory(function () { return null })
+    var noop = function () {}
+    var ctx = {
+      effect: function (fn) { try { return fn() || noop } catch (err) { console.error(err); return noop } },
+      inject: function (deps, cb) { try { cb(ctx) } catch (err) { /* ignore */ } },
+    }
+    mod.apply(ctx)
+
+    // 演示：几秒后把三只直接长到大体型，画面更清楚
+    setTimeout(function () {
+      try {
+        if (window.__dshCrawler) {
+          window.__dshCrawler.setScale(0, 72)
+        }
+      } catch (err) { /* ignore */ }
+    }, 2200)
+    setTimeout(function () { try { window.__dshCrawler.setScale(1, 64) } catch (err) {} }, 4200)
+    setTimeout(function () { try { window.__dshCrawler.setScale(2, 80) } catch (err) {} }, 6200)
+  </script>
+</body>
+</html>
