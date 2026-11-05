@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-crawler",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "在 DeepSeek Harness 界面上爬行的小虫子：1111 个来自 Slava Rybin《Crawlers》展的形态，吃掉界面上的词、长大、结丝、生灭；纯视觉特效，不写入你的内容。",
   "private": false,
   "type": "module",

@@ -160,6 +160,8 @@ node scripts/build-client.cjs
 
 ## 版本记录
 
+- **0.1.11** 启动时不再多出一只：初始创建期间禁止补员、非初始路径生虫前检查数量上限；
+  `window.__crawlerPerf` 现在记录每次 `spawn/remove` 的来源（start/topup/birth/swap/trim/death），便于定位数量异常。
 - **0.1.10** ① 「引擎在画但界面空白」兜底：特效层 z-index 抬到 2147483600（避免被皮肤/壁纸全屏层盖住）；
   引擎 eval 失败时自动换形态重试（最多 3 次），不再留下空白画布；一次性空白画布诊断写入 `window.__crawlerWarnings`。
   ② 关掉「显示爬虫」后：overlay 立即 dispose（画布/循环/定时器全停，实测脚本 CPU 5.2% → 0.6%，剩下的是 DSH 自身），
