@@ -18,7 +18,7 @@ const SEEDS_GZ_B64 = '__SEEDS_GZ_B64__'
 const AUDIO_POOL = __AUDIO_POOL__
 const AUDIO_MAP_GZ_B64 = '__AUDIO_MAP_GZ_B64__'
 
-const Z_BASE = 2147483000
+const Z_BASE = 2147483600
 // 每只虫一张「跟随相机的小画布」：只覆盖虫子周围一块，而不是整屏。
 // 画布位置 = 引擎相机（世界坐标里画布左上角），所以虫子永远画在画布中央，
 // 屏幕坐标 == 世界坐标；显存从每只 5.7MB 降到 ~1.1MB。
@@ -175,6 +175,8 @@ let seedsPromise = null // 主线程解析（Worker 不可用时的兜底）
 let audioMap = {}
 let audioPromise = null
 let seedWorkerPromise = null
+let seedWorkerRef = null
+let seedWorkerStopTimer = 0
 let seedReqId = 0
 const seedWaiting = new Map()
 const seedPool = []
@@ -256,7 +258,7 @@ function startSeedWorker() {
       }
       w.onmessage = (e) => {
         const d = e.data || {}
-        if (d.type === 'ready') { finish(w); return }
+        if (d.type === 'ready') { seedWorkerRef = w; finish(w); return }
         if (d.type === 'error') { fail(); return }
         if (d.type === 'seeds') {
           const fn = seedWaiting.get(d.id)
@@ -272,6 +274,23 @@ function startSeedWorker() {
     return w
   })
   return seedWorkerPromise
+}
+
+function cancelSeedWorkerStop() {
+  if (seedWorkerStopTimer) { try { clearTimeout(seedWorkerStopTimer) } catch (err) { /* ignore */ } ; seedWorkerStopTimer = 0 }
+}
+function scheduleSeedWorkerStop() {
+  cancelSeedWorkerStop()
+  seedWorkerStopTimer = setTimeout(() => {
+    seedWorkerStopTimer = 0
+    if (cfg.enabled) return
+    const w = seedWorkerRef
+    seedWorkerRef = null
+    seedWorkerPromise = null
+    seedPool.length = 0
+    try { w && w.terminate() } catch (err) { /* ignore */ }
+    perf('seed-worker-stop', 0)
+  }, 60000)
 }
 
 function requestSeeds(n) {
@@ -1177,6 +1196,14 @@ function createApp() {
       window.__crawlerCanvasSlot = null
       window.__crawlerDataSlot = null
     }
+    // 引擎没接管这张画布（eval 失败）：清掉，交给 spawnPet 换一个形态重试。
+    // 注意：画布尺寸要到引擎第一帧绘制时才设置（此前是 300×150 默认值），这里不能按尺寸判断。
+    if (!api) {
+      try { api && api.stop && api.stop() } catch (err) { /* ignore */ }
+      try { canvas.remove() } catch (err) { /* ignore */ }
+      try { dataEl.remove() } catch (err) { /* ignore */ }
+      return null
+    }
     // 把虫子的世界坐标挪到出生点，再把相机对准它（画布左上角 = 相机 = 出生点 - 半屏）
     try {
       if (api && api.spider && api.spider.position && typeof api.spider.shift === 'function') {
@@ -1255,6 +1282,38 @@ function createApp() {
     return pet
   }
 
+  /** 建一只虫：引擎没接住画布时自动换形态重试（最多 3 次），并在 1.8s 后检查画布是否真的着墨。 */
+  async function spawnPet(index, opts) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (disposed) return null
+      const seed = await takeSeed()
+      if (!seed) return null
+      const pet = createPet(seed, index, opts)
+      if (!pet) { perf('engine-retry', 0, attempt + 1); continue }
+      scheduleBlankCheck(pet)
+      return pet
+    }
+    return null
+  }
+
+  /** 一次性的空白画布诊断：只记录，不干预；有 value 时写进 window.__crawlerWarnings。 */
+  function scheduleBlankCheck(pet) {
+    setTimeout(() => {
+      try {
+        if (disposed || !pet.api || !pet.canvas) return
+        const c = pet.canvas
+        if (!c.width || !c.height) return
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data
+        let n = 0
+        for (let i = 3; i < d.length; i += 4 * 97) if (d[i] > 8) n++
+        if (n > 0) return
+        const w = window.__crawlerWarnings || (window.__crawlerWarnings = [])
+        w.push({ ev: 'blank-canvas', id: c.id, w: c.width, h: c.height, at: Date.now() })
+        if (w.length > 20) w.shift()
+      } catch (err) { /* ignore */ }
+    }, 1800)
+  }
+
   function removePet(index) {
     const i = pets.findIndex((p) => p.index === index)
     if (i < 0) return
@@ -1322,9 +1381,9 @@ function createApp() {
     const __ts = now()
     for (let i = 0; i < target; i++) {
       if (disposed) return
-      const seed = await takeSeed()
-      if (!seed || disposed) return
-      pets.push(createPet(seed, i))
+      const pet = await spawnPet(i)
+      if (!pet || disposed) return
+      pets.push(pet)
       if (i < target - 1) await new Promise((r) => requestAnimationFrame(r))
     }
     perf('start-pets', now() - __ts, target)
@@ -1348,9 +1407,9 @@ function createApp() {
           } else if (pets.length < maxPets && Math.random() < 0.5) {
             // 随机繁殖：少了才补，不会死一只马上生一只
             const newIndex = (pets.reduce((m, p) => Math.max(m, p.index), 0) || 0) + 1
-            takeSeed().then((seed) => {
-              if (!seed || disposed || pets.length >= maxPets) return
-              pets.push(createPet(seed, newIndex))
+            spawnPet(newIndex).then((pet) => {
+              if (!pet || disposed || pets.length >= maxPets) return
+              pets.push(pet)
             }).catch(() => { /* ignore */ })
           }
         }
@@ -1419,9 +1478,9 @@ function createApp() {
       const n = Math.max(1, Number(cfg.count) || 3)
       for (let k = 0; k < n; k++) {
         if (disposed) return
-        const seed = await takeSeed()
-        if (!seed) break
-        pets.push(createPet(seed, k + 100 + k))
+        const pet = await spawnPet(k + 100 + k)
+        if (!pet) break
+        pets.push(pet)
       }
       applyConfig()
     } catch (err) { /* ignore */ }
@@ -1689,11 +1748,10 @@ function createApp() {
       ;(async () => {
         for (let k = 0; k < deficit; k++) {
           if (disposed || pets.length >= target) break
-          const seed = await takeSeed()
-          if (!seed) break
           const idx = (pets.reduce((m, p) => Math.max(m, p.index), 0) || 0) + 1
-          const np = createPet(seed, idx)
-          if (np) pets.push(np)
+          const np = await spawnPet(idx)
+          if (!np) break
+          pets.push(np)
         }
       })().catch(() => { /* ignore */ })
     }
@@ -2001,10 +2059,13 @@ let overlayStop = null
 /** 按 cfg.enabled 起停整个 overlay：关闭时 dispose（不再有任何后台循环），打开时重建。 */
 function ensureOverlay() {
   if (cfg.enabled) {
+    try { cancelSeedWorkerStop() } catch (err) { /* ignore */ }
     if (!overlayStop) { try { overlayStop = startOverlay() } catch (err) { console.warn('[crawler] start failed', err) } }
   } else if (overlayStop) {
     try { overlayStop() } catch (err) { /* ignore */ }
     overlayStop = null
+    // overlay 已经 dispose；Worker 还占着 ~10MB 解析后的形态数据，60s 后没人打开就释放
+    try { scheduleSeedWorkerStop() } catch (err) { /* ignore */ }
   }
 }
 
