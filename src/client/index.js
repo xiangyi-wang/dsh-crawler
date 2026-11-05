@@ -59,6 +59,16 @@ const rnd = (a, b) => a + Math.random() * (b - a)
 const pick = (arr) => arr[(Math.random() * arr.length) | 0]
 const now = () => performance.now()
 
+// 轻量启动/销毁打点：window.__crawlerPerf 可读，用来排查卡顿（保留最近 60 条）
+const perfLog = []
+try { window.__crawlerPerf = perfLog } catch (err) { /* ignore */ }
+function perf(name, ms, extra) {
+  try {
+    perfLog.push([name, Math.round(ms), extra === undefined ? 0 : extra, Math.round(now())])
+    if (perfLog.length > 60) perfLog.shift()
+  } catch (err) { /* ignore */ }
+}
+
 // 虫子画布的渲染倍率：跟随显示器缩放（上限 2x）。固定 1x 时，125%/150% 缩放的显示器
 // 会把画布放大显示——虫子看起来就是"糊"的。
 const DPR_CAP = (() => {
@@ -161,22 +171,134 @@ function persist(force) {
   } catch (err) { /* ignore */ }
 }
 
-let seedsPromise = null
+let seedsPromise = null // 主线程解析（Worker 不可用时的兜底）
 let audioMap = {}
+let audioPromise = null
+let seedWorkerPromise = null
+let seedReqId = 0
+const seedWaiting = new Map()
+const seedPool = []
 async function gunzipB64(b64) {
   const bin = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
   const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))
   return await new Response(stream).text()
 }
+
+/** 音色映射只有 1.5MB，主线程解析一次即可（几十 ms 以内）。 */
+function loadAudio() {
+  if (!audioPromise) {
+    audioPromise = (async () => {
+      const t0 = now()
+      try {
+        const text = await gunzipB64(AUDIO_MAP_GZ_B64)
+        audioMap = JSON.parse(text) || {}
+      } catch (err) { audioMap = {} }
+      perf('audio-map', now() - t0)
+      return audioMap
+    })()
+  }
+  return audioPromise
+}
+
+/** 兜底：Worker 不可用时才在主线程解压解析 10MB 形态（约 670ms）。 */
 function loadSeeds() {
   if (!seedsPromise) {
     seedsPromise = (async () => {
-      const [seedText, audioText] = await Promise.all([gunzipB64(SEEDS_GZ_B64), gunzipB64(AUDIO_MAP_GZ_B64)])
-      try { audioMap = JSON.parse(audioText) || {} } catch (err) { audioMap = {} }
-      return JSON.parse(seedText)
+      const t0 = now()
+      const seedText = await gunzipB64(SEEDS_GZ_B64)
+      const all = JSON.parse(seedText)
+      perf('seeds-parse-fallback', now() - t0)
+      return Array.isArray(all) ? all : Object.values(all)
     })()
   }
   return seedsPromise
+}
+
+// Worker：10MB 形态数据的解压 + JSON.parse 全部放到后台线程；主线程只按需取几只虫的形态。
+// 启动时主线程原本要阻塞 ~670ms，现在是 ~0（只传一个 2.4MB 的 base64 字符串进 worker）。
+const SEED_WORKER_SRC = [
+  "let seeds = null",
+  "self.onmessage = async (e) => {",
+  "  const d = e.data || {}",
+  "  if (d.type === 'init') {",
+  "    try {",
+  "      const bin = Uint8Array.from(atob(d.b64), (c) => c.charCodeAt(0))",
+  "      const text = await new Response(new Blob([bin]).stream().pipeThrough(new DecompressionStream('gzip'))).text()",
+  "      const parsed = JSON.parse(text)",
+  "      seeds = Array.isArray(parsed) ? parsed : Object.values(parsed)",
+  "      self.postMessage({ type: 'ready', n: seeds.length })",
+  "    } catch (err) { self.postMessage({ type: 'error', message: String(err) }) }",
+  "    return",
+  "  }",
+  "  if (d.type === 'pick') {",
+  "    if (!seeds) { self.postMessage({ type: 'seeds', id: d.id, seeds: [] }); return }",
+  "    const n = Math.max(1, Math.min(16, d.n | 0))",
+  "    const out = []",
+  "    for (let i = 0; i < n; i++) out.push(seeds[(Math.random() * seeds.length) | 0])",
+  "    self.postMessage({ type: 'seeds', id: d.id, seeds: out })",
+  "  }",
+  "}",
+].join('\n')
+
+function startSeedWorker() {
+  if (seedWorkerPromise) return seedWorkerPromise
+  seedWorkerPromise = new Promise((resolve) => {
+    let done = false
+    const finish = (w) => { if (done) return; done = true; resolve(w) }
+    try {
+      if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined' ||
+          !URL.createObjectURL || typeof DecompressionStream === 'undefined') { finish(null); return }
+      const url = URL.createObjectURL(new Blob([SEED_WORKER_SRC], { type: 'text/javascript' }))
+      const w = new Worker(url)
+      const fail = () => {
+        try { w.terminate() } catch (err) { /* ignore */ }
+        finish(null)
+      }
+      w.onmessage = (e) => {
+        const d = e.data || {}
+        if (d.type === 'ready') { finish(w); return }
+        if (d.type === 'error') { fail(); return }
+        if (d.type === 'seeds') {
+          const fn = seedWaiting.get(d.id)
+          if (fn) { seedWaiting.delete(d.id); fn(d.seeds) }
+        }
+      }
+      w.onerror = fail
+      w.postMessage({ type: 'init', b64: SEEDS_GZ_B64 })
+      setTimeout(() => { if (!done) fail() }, 4000)
+    } catch (err) { finish(null) }
+  }).then((w) => {
+    if (!w) console.warn('[crawler] seed worker unavailable — parsing on main thread')
+    return w
+  })
+  return seedWorkerPromise
+}
+
+function requestSeeds(n) {
+  return startSeedWorker().then((w) => {
+    if (!w) return null
+    return new Promise((resolve) => {
+      const id = ++seedReqId
+      seedWaiting.set(id, resolve)
+      try { w.postMessage({ type: 'pick', id, n }) } catch (err) { seedWaiting.delete(id); resolve(null) }
+      setTimeout(() => {
+        if (seedWaiting.has(id)) { seedWaiting.delete(id); resolve(null) }
+      }, 2500)
+    })
+  })
+}
+
+/** 取一个形态：优先从 worker 的小池子里拿，必要时补一批；worker 不可用才退回主线程。 */
+async function takeSeed() {
+  await loadAudio()
+  if (seedPool.length) return seedPool.shift()
+  const batch = await requestSeeds(6)
+  if (batch && batch.length) {
+    seedPool.push(...batch)
+    return seedPool.shift()
+  }
+  const all = await loadSeeds()
+  return pick(all)
 }
 
 function buildData(seed, scaleOverride) {
@@ -1043,6 +1165,7 @@ function createApp() {
     // 引擎按 id 找画布/数据脚本，这里把「这一次 eval 该用哪张」放进槽位（patch 见 build-client.cjs）
     window.__crawlerCanvasSlot = canvas
     window.__crawlerDataSlot = dataEl
+    const __te = now()
     try {
       ;(0, eval)(engineText())
       api = window.__crawler_api || null
@@ -1050,6 +1173,7 @@ function createApp() {
     } catch (err) {
       console.warn('[crawler] engine failed', err)
     } finally {
+      perf('engine-eval', now() - __te)
       window.__crawlerCanvasSlot = null
       window.__crawlerDataSlot = null
     }
@@ -1193,14 +1317,17 @@ function createApp() {
     if (started || disposed) return
     started = true
     makeInk()
-    const seeds = await loadSeeds()
-    if (disposed) return
-    // 开局数量跟「数量」设置走（旧版写死 3，导致存档里的 5 只开机后只剩 3 只）
+    // 形态数据在 Worker 里解析；这里逐只取，每只之间让出一帧，避免连续 eval 引擎卡住界面
     const target = clamp(Number(cfg.count) || 3, 1, 5)
+    const __ts = now()
     for (let i = 0; i < target; i++) {
       if (disposed) return
-      pets.push(createPet(pick(seeds), i))
+      const seed = await takeSeed()
+      if (!seed || disposed) return
+      pets.push(createPet(seed, i))
+      if (i < target - 1) await new Promise((r) => requestAnimationFrame(r))
     }
+    perf('start-pets', now() - __ts, target)
     raf = requestAnimationFrame(loop)
     // 把存档里的配置一次性落到刚建好的个体上（隐藏/数量/声音/速度）
     applyConfig()
@@ -1221,7 +1348,10 @@ function createApp() {
           } else if (pets.length < maxPets && Math.random() < 0.5) {
             // 随机繁殖：少了才补，不会死一只马上生一只
             const newIndex = (pets.reduce((m, p) => Math.max(m, p.index), 0) || 0) + 1
-            pets.push(createPet(pick(seeds), newIndex))
+            takeSeed().then((seed) => {
+              if (!seed || disposed || pets.length >= maxPets) return
+              pets.push(createPet(seed, newIndex))
+            }).catch(() => { /* ignore */ })
           }
         }
         cycle()
@@ -1281,13 +1411,20 @@ function createApp() {
     setConfig({ mode: cfg.mode === 'follow' ? 'auto' : 'follow' })
   })
   const swapRow = mkRow('↻ 换一批形态', async () => {
-    const seeds = await loadSeeds()
-    const idx = pets.map((p) => p.index)
-    for (const i of idx) removePet(i)
-    setTimeout(() => {
-      for (let k = 0; k < Math.max(1, Number(cfg.count) || 3); k++) pets.push(createPet(pick(seeds), k + 100 + k))
+    try {
+      const idx = pets.map((p) => p.index)
+      for (const i of idx) removePet(i)
+      await new Promise((r) => setTimeout(r, 800))
+      if (disposed) return
+      const n = Math.max(1, Number(cfg.count) || 3)
+      for (let k = 0; k < n; k++) {
+        if (disposed) return
+        const seed = await takeSeed()
+        if (!seed) break
+        pets.push(createPet(seed, k + 100 + k))
+      }
       applyConfig()
-    }, 800)
+    } catch (err) { /* ignore */ }
   })
   /** 真正的暂停/继续：停步进定时器 + 用引擎自己的 set_active 暂停渲染（api.stop() 会关掉上下文，恢复不回来） */
   function setRunning(next) {
@@ -1549,14 +1686,16 @@ function createApp() {
     if (pets.length < target) {
       // 一次补齐到目标数量（以前每次配置变更只补 1 只，1→5 只会变成 2）
       const deficit = target - pets.length
-      loadSeeds().then((seeds) => {
+      ;(async () => {
         for (let k = 0; k < deficit; k++) {
           if (disposed || pets.length >= target) break
+          const seed = await takeSeed()
+          if (!seed) break
           const idx = (pets.reduce((m, p) => Math.max(m, p.index), 0) || 0) + 1
-          const np = createPet(pick(seeds), idx)
+          const np = createPet(seed, idx)
           if (np) pets.push(np)
         }
-      }).catch(() => { /* ignore */ })
+      })().catch(() => { /* ignore */ })
     }
   }
   cleanups.push(subscribe(applyConfig))
@@ -1573,6 +1712,7 @@ function createApp() {
   return {
     dispose() {
       disposed = true
+      const __td = now()
       cancelAnimationFrame(raf)
       for (const c of cleanups) { try { c() } catch (err) { /* ignore */ } }
       for (const p of pets) { if (p.ghost && p.ghost.timer) clearInterval(p.ghost.timer); p.dispose() }
@@ -1582,6 +1722,7 @@ function createApp() {
       clearEatenHighlights()
       if (ink) ink.remove()
       ink = null
+      perf('dispose', now() - __td, pets.length)
       inkCtx = null
     },
   }
@@ -1870,8 +2011,22 @@ function ensureOverlay() {
 function apply(ctx) {
   ctx.effect(() => {
     const off = subscribe(ensureOverlay)
-    ensureOverlay()
-    return () => { try { off() } catch (err) { /* ignore */ } ; if (overlayStop) { try { overlayStop() } catch (err) { /* ignore */ } ; overlayStop = null } }
+    // 首次启动让出给 DSH 自己的 boot：等一个空闲帧（最多 2.5s）再建 overlay，
+    // 避免页面刚起来时和宿主抢主线程（之前会叠加出几百 ms 的长任务）。
+    let cancelled = false
+    let kick = 0
+    const startSoon = () => { if (!cancelled) ensureOverlay() }
+    try {
+      if (typeof requestIdleCallback === 'function') kick = requestIdleCallback(startSoon, { timeout: 2500 })
+      else kick = setTimeout(startSoon, 1200)
+    } catch (err) { kick = setTimeout(startSoon, 1200) }
+    return () => {
+      cancelled = true
+      try { if (typeof cancelIdleCallback === 'function') cancelIdleCallback(kick) } catch (err) { /* ignore */ }
+      try { clearTimeout(kick) } catch (err) { /* ignore */ }
+      try { off() } catch (err) { /* ignore */ }
+      if (overlayStop) { try { overlayStop() } catch (err) { /* ignore */ } ; overlayStop = null }
+    }
   }, '@dsh-external/dsh-crawler: overlay')
   // 设置页是「锦上添花」：slots 没就绪也不能拖累 overlay，所以走 ctx.inject 等它。
   try {
